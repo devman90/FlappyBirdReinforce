@@ -36,6 +36,7 @@ def train(args):
     episode = 0
     iteration = 0
     epsilon = args.epsilon
+    decayed = args.decayed
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -45,11 +46,7 @@ def train(args):
     high_score = 0
 
     # initialize replay memory
-    """
-    TO DO
-
-    D =
-    """
+    D = deque()
 
     elapsed_time = 0
     action = torch.zeros([model.number_of_actions], dtype=torch.float32)
@@ -57,7 +54,7 @@ def train(args):
     terminal = game.game_over()
 
     image_data = game.get_torch_image().cuda()
-    state = image_data.unsqueeze(0)
+    state = torch.cat((image_data, image_data, image_data, image_data)).unsqueeze(0)
 
     start = time.time()
 
@@ -66,21 +63,13 @@ def train(args):
         action = torch.zeros([model.number_of_actions], dtype=torch.float32)
 
         # epsilon greedy exploration
-        random_action = False
-        """
-        TO DO
-
-        random_action =
-        """
+        eps = epsilon - iteration * (epsilon - decayed) / args.iteration
+        random_action = random.random() <= eps
 
         # Pick action --> random or index of maximum q value
-        action_index = 0
-        """
-        TO DO
-
-        action_index =
-        """
-
+        action_index = [torch.randint(model.number_of_actions, torch.Size([]), dtype=torch.int)
+                        if random_action
+                        else torch.argmax(output)][0]
         action[action_index] = 1
 
         elapsed_time = time.time() - start
@@ -90,37 +79,43 @@ def train(args):
         terminal = game.game_over()
         image_data_1 = game.get_torch_image().cuda()
 
-        state_1 = image_data_1.unsqueeze(0)
+        state_1 = torch.cat((state.squeeze(0)[1:, :, :], image_data_1)).unsqueeze(0).cuda()
         action = action.unsqueeze(0).cuda()
         reward = torch.from_numpy(np.array([reward], dtype=np.float32)).unsqueeze(0).cuda()
 
         # save transition to replay memory
-        """
-        TO DO
-        """
+        D.append((state.cpu(), action.cpu(), reward.cpu(), state_1.cpu(), terminal))
 
         # if replay memory is full, remove the oldest transition
-        """
-        TO DO
-        """
+        if len(D) > args.replayMemorySize:
+            D.popleft()
 
         # sample random minibatch
-        """
-        TO DO
-        """
+        minibatch = random.sample(D, min(len(D), args.minibatchSize))
+
+        state_batch   = torch.cat(tuple(d[0] for d in minibatch)).cuda()
+        action_batch  = torch.cat(tuple(d[1] for d in minibatch)).cuda()
+        reward_batch  = torch.cat(tuple(d[2] for d in minibatch)).cuda()
+        state_1_batch = torch.cat(tuple(d[3] for d in minibatch)).cuda()
 
         # get output for the next state
-        output_1 = model(state_1)
+        output_1_batch = model(state_1_batch)
 
-        # Q-learning target
-        y = reward if terminal else reward + args.gamma * torch.max(output_1)
+        y_batch = torch.cat(tuple(reward_batch[i] if minibatch[i][4]
+                                  else reward_batch[i] + args.gamma * torch.max(output_1_batch[i])
+                                  for i in range(len(minibatch))))
 
         # calculate with target network
-        q_value = torch.sum(model(state) * action, dim=1)
+        q_value = torch.sum(model(state_batch) * action_batch, dim=1)
+
+        # LR warmup
+        if iteration < 20000:
+            for g in optimizer.param_groups:
+                g['lr'] = args.lr * iteration / 20000
 
         optimizer.zero_grad()
-        y = y.detach()
-        loss = criterion(q_value, y)
+        y_batch = y_batch.detach()
+        loss = criterion(q_value, y_batch)
 
         loss.backward()
         optimizer.step()
@@ -129,7 +124,10 @@ def train(args):
         iteration += 1
         score += game.reward
 
+        args.writer.add_scalar('Train/lr', optimizer.param_groups[0]['lr'], iteration)
+        args.writer.add_scalar('Train/epsilon', eps, iteration)
         args.writer.add_scalar('Train/loss', loss, iteration)
+        args.writer.add_scalar('Train/replay_memory', len(D), iteration)
 
         if terminal:
             score = score - game.reward_terminal
@@ -153,13 +151,15 @@ def train(args):
                )
 
 def test(args):
+    model_path = sorted(glob(os.path.join('ckpt', args.tag, '*.pth')))[-1]
     model = torch.load(
-        sorted(glob(os.path.join('ckpt', args.tag, '*.pth')))[-1],
+        model_path,
         map_location='cpu'
     ).eval()
-    print('Loaded model: {}'.format(sorted(glob(os.path.join('ckpt', args.tag, '*.pth')))[-1]))
+    print('Loaded model: {}'.format(model_path))
+    model_name = os.path.basename(os.path.splitext(model_path)[0])
     # initialize video writer
-    video_filename = 'output_{}.avi'.format(args.tag)
+    video_filename = 'output_{}_{}.avi'.format(args.tag, model_name)
 
     dict_screen_shape = {
         "flappy":(288, 512),
@@ -180,7 +180,7 @@ def test(args):
         score = 0
 
         image_data = game.get_torch_image()
-        state = image_data.unsqueeze(0)
+        state = torch.cat((image_data, image_data, image_data, image_data)).unsqueeze(0)
         while not terminal:
             output = model(state)[0]
             action = torch.zeros([model.number_of_actions], dtype=torch.float32)
@@ -188,12 +188,11 @@ def test(args):
             score += game.act(action_index)
             terminal = game.game_over()
             image_data_1 = game.get_torch_image()
-            state = image_data_1.unsqueeze(0)
+            state = torch.cat((state.squeeze(0)[1:, :, :], image_data_1)).unsqueeze(0)
 
             out.write(game.get_image())
 
         game.reset_game()
-        score = score - game.reward_terminal
         score_list.append(score)
         time_list.append(time.time()-start)
         print('Game Ended!')
@@ -204,6 +203,7 @@ def test(args):
     out.save()
     print('Total Score: {}'.format(sum(score_list)))
     print('Total Run Time: {:.3f}'.format(sum(time_list)))
+    print('Saved video: {}'.format(video_filename))
 
 
 def main(args):
@@ -225,10 +225,16 @@ if __name__ == "__main__":
                         help='Value of gamma')
     parser.add_argument('--epsilon', default='0.02', type=float,
                         help='Value of epsilon')
+    parser.add_argument('--decayed', default=0.02, type=float,
+                        help='Value of epsilon at the end of the training')
     parser.add_argument('--iteration', default=1000000, type=int,
                         help='Number of total iterations to run')
+    parser.add_argument('--minibatchSize', default=256, type=int,
+                        help='Minibatch size (default: 256)')
     parser.add_argument('--lr', default=1e-4, type=float,
                         help='Learning rate')
+    parser.add_argument('--replayMemorySize', default=10000, type=int,
+                        help='Size of replay memory')
     parser.add_argument('--use_pretrained', default=False, type=bool,
                         help='Use pretrained weight')
     parser.add_argument('--tag', default="dqn", type=str,

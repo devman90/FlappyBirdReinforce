@@ -38,11 +38,13 @@ class Game:
     def get_torch_image(self):
         image = self.game.getScreenRGB()
         if self.game_name == "flappy":
-            image = cv2.resize(image, (84, 84))
-            image = np.reshape(image, (84, 84, 3))
+            image = image[:,:-96,:] # Remove ground
+            image = cv2.cvtColor(cv2.resize(image, (84, 84)), cv2.COLOR_BGR2GRAY)
+            image = np.reshape(image, (84, 84, 1))
         elif self.game_name == "pixelcopter":
-            image = np.reshape(image, (48, 48, 3))
-        image[image > 0] = 255
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            image = np.reshape(image, (48, 48, 1))
+        image[image > 0] = 1
         image = image.transpose(2, 0, 1) #CHW
         image = image.astype(np.float32)
         image = torch.from_numpy(image)
